@@ -1,18 +1,44 @@
 import SwiftUI
 
+// MARK: - CurrentValueBadge
+
+/// Small secondary badge showing the source file's current value for a field.
+private struct CurrentValueBadge: View {
+    let value: String
+    var body: some View {
+        Text(value)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.secondary.opacity(0.1))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+}
+
 // MARK: - OptionalPicker
 /// A Picker that includes a "Preserve" (nil) option alongside the enum cases.
+/// Pass `current` to show the source file's existing value as a badge.
 struct OptionalPicker<T: CaseIterable & Hashable & Identifiable>: View {
     let label: String
     @Binding var selection: T?
     let options: [T]
     let displayName: (T) -> String
+    var current: String? = nil
 
     var body: some View {
-        Picker(label, selection: $selection) {
-            Text("Preserve").tag(Optional<T>.none)
-            ForEach(options) { option in
-                Text(displayName(option)).tag(Optional(option))
+        LabeledContent(label) {
+            HStack(spacing: 6) {
+                if let c = current {
+                    CurrentValueBadge(value: c)
+                }
+                Picker("", selection: $selection) {
+                    Text("Preserve").tag(Optional<T>.none)
+                    ForEach(options) { option in
+                        Text(displayName(option)).tag(Optional(option))
+                    }
+                }
+                .labelsHidden()
             }
         }
     }
@@ -20,25 +46,33 @@ struct OptionalPicker<T: CaseIterable & Hashable & Identifiable>: View {
 
 // MARK: - OptionalTextField
 /// A TextField that binds to an optional String (empty = nil).
+/// Pass `current` to show the source file's existing value as a badge.
 struct OptionalTextField: View {
     let placeholder: String
     @Binding var value: String?
     let label: String
+    var current: String? = nil
 
-    init(_ placeholder: String, value: Binding<String?>, label: String) {
+    init(_ placeholder: String, value: Binding<String?>, label: String, current: String? = nil) {
         self.placeholder = placeholder
         self._value = value
         self.label = label
+        self.current = current
     }
 
     var body: some View {
         LabeledContent(label) {
-            TextField(placeholder, text: Binding(
-                get: { value ?? "" },
-                set: { value = $0.isEmpty ? nil : $0 }
-            ))
-            .textFieldStyle(.roundedBorder)
-            .frame(maxWidth: 240)
+            HStack(spacing: 6) {
+                TextField(placeholder, text: Binding(
+                    get: { value ?? "" },
+                    set: { value = $0.isEmpty ? nil : $0 }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 200)
+                if let c = current {
+                    CurrentValueBadge(value: c)
+                }
+            }
         }
     }
 }
@@ -91,6 +125,7 @@ struct SettingsView: View {
         Form {
             ffmpegSection
             outputSection
+            aboutSection
             Section("UI") {
                 Toggle("Show Command Preview by Default", isOn: $state.showCommandPreview)
             }
@@ -203,6 +238,29 @@ struct SettingsView: View {
                     Task { await updater.checkForUpdates() }
                 }
                 .controlSize(.small)
+            }
+        }
+    }
+
+    // MARK: About section
+
+    private var aboutSection: some View {
+        let appVersion  = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+        let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+        let ffmpegVer   = FFmpegLocator.version(of: "ffmpeg")
+        let ffprobeVer  = FFmpegLocator.version(of: "ffprobe")
+        // Wrap in a Group so the compiler resolves Section as the List/Form variant,
+        // not the Table-row variant (triggered by LabeledContent's dual conformance).
+        return Group {
+            Section {
+                LabeledContent("App Version",
+                               value: "v\(appVersion) (build \(buildNumber))")
+                LabeledContent("FFmpeg",
+                               value: ffmpegVer.map { "v\($0)" } ?? "Not found")
+                LabeledContent("FFprobe",
+                               value: ffprobeVer.map { "v\($0)" } ?? "Not found")
+            } header: {
+                Text("About")
             }
         }
     }

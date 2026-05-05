@@ -6,8 +6,8 @@ struct MetadataFormView: View {
 
     var body: some View {
         Form {
-            ContainerSectionView(settings: $settings)
-            ColorMetadataSectionView(settings: $settings)
+            ContainerSectionView(settings: $settings, mediaFile: mediaFile)
+            ColorMetadataSectionView(settings: $settings, mediaFile: mediaFile)
             AFDSectionView(settings: $settings)
             HDRSectionView(settings: $settings)
             TimecodeSectionView(settings: $settings)

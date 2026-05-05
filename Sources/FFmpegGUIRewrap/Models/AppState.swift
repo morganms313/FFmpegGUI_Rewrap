@@ -118,6 +118,18 @@ class AppState {
                 job.status = .failed(error: msg)
             }
         }
+
+        // After the runner loop — apply QT conform if needed
+        if case .done = job.status,
+           [OutputFormat.mov, .mp4].contains(job.settings.outputFormat),
+           let fps = job.settings.frameRateOverride, !fps.isEmpty {
+            do {
+                try QTConformer.conform(url: outputURL, targetFPS: fps)
+                job.appendLog("QT frame-rate conform applied: \(fps) fps")
+            } catch {
+                job.status = .failed(error: "Frame rate conform failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: FFmpeg availability

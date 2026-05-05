@@ -40,6 +40,9 @@ struct TimecodeSectionView: View {
         }
 
         Toggle("Drop Frame (;)", isOn: $settings.timecodeDropFrame)
+            .onChange(of: settings.timecodeDropFrame) {
+                settings.timecodeStart = formatTimecode(settings.timecodeStart)
+            }
 
         Text("Use HH:MM:SS:FF (non-drop) or HH:MM:SS;FF (drop). Drop frame applies to 29.97 and 59.94 fps.")
             .font(.caption)
