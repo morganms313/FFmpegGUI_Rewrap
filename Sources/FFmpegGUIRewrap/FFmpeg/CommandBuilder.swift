@@ -85,6 +85,11 @@ class CommandBuilder {
             // DAR is expressed as a rational in the container; use setdar filter if stream copy won't accept it
             args += ["-aspect:v", dar]
         }
+        if let fps = settings.frameRateOverride, !fps.isEmpty {
+            // Override the container-reported frame rate without re-encoding.
+            // Accepts rational notation (e.g. 24000/1001) or decimal (e.g. 23.976).
+            args += ["-r:v", fps]
+        }
 
         // MARK: AFD
         switch settings.afdMode {

@@ -91,6 +91,7 @@ struct SettingsView: View {
         Form {
             ffmpegSection
             outputSection
+            aboutSection
             Section("UI") {
                 Toggle("Show Command Preview by Default", isOn: $state.showCommandPreview)
             }
@@ -203,6 +204,29 @@ struct SettingsView: View {
                     Task { await updater.checkForUpdates() }
                 }
                 .controlSize(.small)
+            }
+        }
+    }
+
+    // MARK: About section
+
+    private var aboutSection: some View {
+        let appVersion  = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+        let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+        let ffmpegVer   = FFmpegLocator.version(of: "ffmpeg")
+        let ffprobeVer  = FFmpegLocator.version(of: "ffprobe")
+        // Wrap in a Group so the compiler resolves Section as the List/Form variant,
+        // not the Table-row variant (triggered by LabeledContent's dual conformance).
+        return Group {
+            Section {
+                LabeledContent("App Version",
+                               value: "v\(appVersion) (build \(buildNumber))")
+                LabeledContent("FFmpeg",
+                               value: ffmpegVer.map { "v\($0)" } ?? "Not found")
+                LabeledContent("FFprobe",
+                               value: ffprobeVer.map { "v\($0)" } ?? "Not found")
+            } header: {
+                Text("About")
             }
         }
     }
