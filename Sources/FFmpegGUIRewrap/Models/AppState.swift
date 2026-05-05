@@ -123,8 +123,12 @@ class AppState {
         if case .done = job.status,
            [OutputFormat.mov, .mp4].contains(job.settings.outputFormat),
            let fps = job.settings.frameRateOverride, !fps.isEmpty {
+            // Read the source file's mvhd timescale so QTConformer can restore it
+            // if FFmpeg's muxer normalised it (e.g. ARRI 24000 → FFmpeg default 1000).
+            let srcTimescale = QTConformer.readMovieTimescale(url: job.mediaFile.url)
             do {
-                try QTConformer.conform(url: outputURL, targetFPS: fps)
+                try QTConformer.conform(url: outputURL, targetFPS: fps,
+                                        originalMovieTimescale: srcTimescale)
                 job.appendLog("QT frame-rate conform applied: \(fps) fps")
             } catch {
                 job.status = .failed(error: "Frame rate conform failed: \(error.localizedDescription)")

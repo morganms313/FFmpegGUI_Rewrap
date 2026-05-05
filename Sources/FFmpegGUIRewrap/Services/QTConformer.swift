@@ -9,12 +9,16 @@ struct QTConformer {
 
     // MARK: - Public API
 
-    /// Conform `url` in-place to `targetFPS`.
+    /// Conform `url` in-place to `targetFPS`, optionally restoring the original mvhd timescale.
     ///
     /// - Parameters:
     ///   - url: Path to a `.mov` or `.mp4` file (must be writable).
     ///   - targetFPS: Rational string — `"24"`, `"24000/1001"`, or decimal like `"23.976"`.
-    static func conform(url: URL, targetFPS: String) throws {
+    ///   - originalMovieTimescale: If provided and different from what the file currently
+    ///     contains, the mvhd timescale field is restored to this value and all movie-timescale-
+    ///     denominated durations (mvhd, tkhd, elst) are recomputed accordingly. This corrects
+    ///     FFmpeg's MOV muxer silently normalising the timescale to 1000.
+    static func conform(url: URL, targetFPS: String, originalMovieTimescale: Int64? = nil) throws {
         // 1. Memory-map the file for efficient parsing.
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
 
@@ -22,7 +26,7 @@ struct QTConformer {
         let fps = try parseFPS(targetFPS)
 
         // 3. Walk the atom tree and collect patches.
-        let ctx = ConformContext(data: data, fps: fps)
+        let ctx = ConformContext(data: data, fps: fps, originalMovieTimescale: originalMovieTimescale)
         try ctx.findMoov()
 
         // 4. Apply all patches via FileHandle.
@@ -32,6 +36,68 @@ struct QTConformer {
             try fh.seek(toOffset: UInt64(patch.offset))
             fh.write(Data(patch.bytes))
         }
+    }
+
+    /// Read just the mvhd timescale from `url` without modifying the file.
+    /// Returns nil if the file has no moov/mvhd or cannot be parsed.
+    static func readMovieTimescale(url: URL) -> Int64? {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+        var offset = 0
+        while offset < data.count - 8 {
+            guard let (size, type, headerSz) = try? atomHeader(data: data, at: offset) else { break }
+            if type == "moov" {
+                return readMvhdTimescale(data: data, moovOff: offset, moovHeaderSz: headerSz, moovSize: size)
+            }
+            let next = offset + size
+            guard next > offset else { break }
+            offset = next
+        }
+        return nil
+    }
+
+    private static func readMvhdTimescale(data: Data, moovOff: Int, moovHeaderSz: Int, moovSize: Int) -> Int64? {
+        var cursor = moovOff + moovHeaderSz
+        let end = moovOff + moovSize
+        while cursor < end - 7 {
+            guard let (size, type, headerSz) = try? atomHeader(data: data, at: cursor) else { break }
+            if type == "mvhd" {
+                let versionOff = cursor + headerSz
+                guard versionOff < data.count else { break }
+                let version = data[versionOff]
+                let tsOff = versionOff + (version == 1 ? 20 : 12)
+                return try? readUInt32(data: data, at: tsOff)
+            }
+            let next = cursor + size
+            guard next > cursor else { break }
+            cursor = next
+        }
+        return nil
+    }
+
+    // Static helpers used by the read-only path above.
+    private static func atomHeader(data: Data, at offset: Int) throws -> (size: Int, type: String, headerSize: Int) {
+        guard offset + 8 <= data.count else { throw QTConformerError.malformedAtom }
+        let rawSize = Int(try readUInt32(data: data, at: offset))
+        let type = String(bytes: data[offset+4..<offset+8], encoding: .isoLatin1) ?? "????"
+        if rawSize == 1 {
+            guard offset + 16 <= data.count else { throw QTConformerError.malformedAtom }
+            let ext = Int(try readUInt64(data: data, at: offset + 8))
+            return (ext, type, 16)
+        }
+        return (rawSize == 0 ? data.count - offset : rawSize, type, 8)
+    }
+    private static func readUInt32(data: Data, at offset: Int) throws -> Int64 {
+        guard offset + 4 <= data.count else { throw QTConformerError.malformedAtom }
+        return Int64(UInt32(data[offset]) << 24 | UInt32(data[offset+1]) << 16
+                   | UInt32(data[offset+2]) << 8  | UInt32(data[offset+3]))
+    }
+    private static func readUInt64(data: Data, at offset: Int) throws -> UInt64 {
+        guard offset + 8 <= data.count else { throw QTConformerError.malformedAtom }
+        let hi = UInt64(data[offset]) << 56 | UInt64(data[offset+1]) << 48
+               | UInt64(data[offset+2]) << 40 | UInt64(data[offset+3]) << 32
+        let lo = UInt64(data[offset+4]) << 24 | UInt64(data[offset+5]) << 16
+               | UInt64(data[offset+6]) << 8  | UInt64(data[offset+7])
+        return hi | lo
     }
 
     // MARK: - FPS parsing
@@ -99,9 +165,23 @@ struct QTConformer {
         var newDelta: Int64 = 0          // mediaTimescale * den / num  (must be integer)
         var totalSamples: Int64 = 0
         var newMediaDuration: Int64 = 0  // totalSamples * newDelta
-        var movieTimescale: Int64 = 0
+        var movieTimescale: Int64 = 0    // read from output file's mvhd
 
-        init(data: Data, fps: Rational) { self.data = data; self.fps = fps }
+        /// Caller-supplied original mvhd timescale (from source file before FFmpeg ran).
+        /// When set and different from movieTimescale, the mvhd timescale field is patched
+        /// back and all movie-timescale-denominated durations are recomputed.
+        let originalMovieTimescale: Int64?
+
+        /// The timescale to use for movie-level duration computations and patches.
+        var effectiveMovieTimescale: Int64 {
+            originalMovieTimescale ?? movieTimescale
+        }
+
+        init(data: Data, fps: Rational, originalMovieTimescale: Int64? = nil) {
+            self.data = data
+            self.fps = fps
+            self.originalMovieTimescale = originalMovieTimescale
+        }
 
         func findMoov() throws {
             // Scan top-level atoms for moov
@@ -347,7 +427,7 @@ struct QTConformer {
 
         func patchTkhd(at off: Int, headerSize: Int) throws {
             guard movieTimescale > 0 else { throw QTConformerError.missingAtom("mvhd timescale") }
-            let tkhdDur = newMediaDuration * movieTimescale / mediaTimescale
+            let tkhdDur = newMediaDuration * effectiveMovieTimescale / mediaTimescale
             let version = data[off + headerSize]
             if version == 0 {
                 // ver+flags(4) + ctime(4) + mtime(4) + trackID(4) + reserved(4) + duration(4)
@@ -362,15 +442,24 @@ struct QTConformer {
 
         func patchMvhd(at off: Int, headerSize: Int) throws {
             guard movieTimescale > 0, mediaTimescale > 0 else { return }
-            let mvhdDur = newMediaDuration * movieTimescale / mediaTimescale
+            let mvhdDur = newMediaDuration * effectiveMovieTimescale / mediaTimescale
             let version = data[off + headerSize]
             if version == 0 {
                 // ver+flags(4) + ctime(4) + mtime(4) + timescale(4) + duration(4)
-                let durOff = off + headerSize + 4 + 4 + 4 + 4
+                let tsOff  = off + headerSize + 4 + 4 + 4          // timescale field
+                let durOff = off + headerSize + 4 + 4 + 4 + 4      // duration field
+                // Restore original timescale if FFmpeg changed it
+                if let orig = originalMovieTimescale, orig != movieTimescale {
+                    appendUInt32Patch(at: tsOff, value: UInt32(orig))
+                }
                 appendUInt32Patch(at: durOff, value: UInt32(mvhdDur))
             } else {
                 // ver+flags(4) + ctime(8) + mtime(8) + timescale(4) + duration(8)
-                let durOff = off + headerSize + 4 + 8 + 8 + 4
+                let tsOff  = off + headerSize + 4 + 8 + 8          // timescale field
+                let durOff = off + headerSize + 4 + 8 + 8 + 4      // duration field
+                if let orig = originalMovieTimescale, orig != movieTimescale {
+                    appendUInt32Patch(at: tsOff, value: UInt32(orig))
+                }
                 appendUInt64Patch(at: durOff, value: UInt64(mvhdDur))
             }
         }
@@ -380,8 +469,8 @@ struct QTConformer {
             // v0 entry: segDur(4) + mediaTime(4) + rate(4) = 12 bytes
             // v1 entry: segDur(8) + mediaTime(8) + rate(4) = 20 bytes
             guard movieTimescale > 0, mediaTimescale > 0 else { return }
-            let newSegDurV0 = UInt32(newMediaDuration * movieTimescale / mediaTimescale)
-            let newSegDurV1 = UInt64(newMediaDuration * movieTimescale / mediaTimescale)
+            let newSegDurV0 = UInt32(newMediaDuration * effectiveMovieTimescale / mediaTimescale)
+            let newSegDurV1 = UInt64(newMediaDuration * effectiveMovieTimescale / mediaTimescale)
 
             let version = data[off + headerSize]
             let base = off + headerSize + 4  // skip ver+flags
