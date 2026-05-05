@@ -1,9 +1,8 @@
 # -----------------------------------------------------------------------
 # FFmpegGUI-Rewrap — build & package a standalone macOS .app
 #
-#   make               build debug (native arch) + package
-#   make release       build release (native arch) + package
-#   make universal     build release universal binary (arm64 + x86_64)
+#   make               build debug (native arch) + package  [fast, for dev]
+#   make release       build universal release (arm64 + x86_64) + package
 #   make run           build debug, package, and launch
 #   make fetch-ffmpeg  download arm64 ffmpeg + ffprobe from evermeet.cx
 #                      (Intel: app falls back to Homebrew /usr/local/bin/ffmpeg)
@@ -16,10 +15,9 @@ PLIST         = Info.plist
 FFMPEG_BIN    = Sources/FFmpegGUIRewrap/Resources/bin
 
 DEBUG_BIN     = .build/debug/$(PRODUCT)
-RELEASE_BIN   = .build/release/$(PRODUCT)
 UNIVERSAL_BIN = .build/universal/$(PRODUCT)
 
-.PHONY: all debug release universal run fetch-ffmpeg clean
+.PHONY: all debug release run fetch-ffmpeg clean
 
 all: debug
 
@@ -27,15 +25,11 @@ debug:
 	swift build
 	@$(MAKE) --no-print-directory _bundle BIN=$(DEBUG_BIN)
 
+# Release always produces a universal binary (arm64 + x86_64).
+# The bundled ffmpeg (arm64 from evermeet.cx) is lipo'd with the Intel
+# Homebrew build when available; otherwise arm64 only is bundled and
+# Intel users fall back to the system/Homebrew ffmpeg automatically.
 release:
-	swift build -c release
-	@$(MAKE) --no-print-directory _bundle BIN=$(RELEASE_BIN)
-
-# Universal binary: compiles for both arm64 and x86_64, then lipo-merges.
-# The bundled ffmpeg binaries (arm64 from evermeet.cx) are also lipo'd with
-# the x86_64 Homebrew ffmpeg when available; otherwise only arm64 is bundled
-# and Intel users fall back to the system/Homebrew ffmpeg automatically.
-universal:
 	@echo "→ Building arm64…"
 	swift build -c release --arch arm64
 	@echo "→ Building x86_64…"
