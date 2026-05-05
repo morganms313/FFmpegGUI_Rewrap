@@ -22,12 +22,12 @@ struct QTConformer {
         let fps = try parseFPS(targetFPS)
 
         // 3. Walk the atom tree and collect patches.
-        var ctx = ConformContext(data: data, fps: fps)
+        let ctx = ConformContext(data: data, fps: fps)
         try ctx.findMoov()
 
         // 4. Apply all patches via FileHandle.
         let fh = try FileHandle(forUpdating: url)
-        defer { try? fh.close() }
+        defer { fh.synchronizeFile(); try? fh.close() }
         for patch in ctx.patches.sorted(by: { $0.offset < $1.offset }) {
             try fh.seek(toOffset: UInt64(patch.offset))
             fh.write(Data(patch.bytes))
@@ -89,7 +89,7 @@ struct QTConformer {
 
     // MARK: - Atom walking context
 
-    private struct ConformContext {
+    private class ConformContext {
         let data: Data
         let fps: Rational
         var patches: [Patch] = []
@@ -101,7 +101,9 @@ struct QTConformer {
         var newMediaDuration: Int64 = 0  // totalSamples * newDelta
         var movieTimescale: Int64 = 0
 
-        mutating func findMoov() throws {
+        init(data: Data, fps: Rational) { self.data = data; self.fps = fps }
+
+        func findMoov() throws {
             // Scan top-level atoms for moov
             var offset = 0
             while offset < data.count - 8 {
@@ -119,7 +121,7 @@ struct QTConformer {
 
         // MARK: moov
 
-        mutating func walkMoov(at moovOff: Int, size: Int) throws {
+        func walkMoov(at moovOff: Int, size: Int) throws {
             let (_, _, moovHeader) = try atomHeader(at: moovOff)
             let moovEnd = moovOff + size
 
@@ -158,8 +160,8 @@ struct QTConformer {
                     let (_, _, mdiaHeader) = try atomHeader(at: off)
                     try walkChildren(parentOff: off + mdiaHeader, parentEnd: off + childSize) { mOff, mType, mSize, mHeader in
                         if mType == "hdlr" {
-                            // hdlr: ver+flags(4) + pre_defined(4) + handler_type(4)
-                            let handlerTypeOff = mOff + mHeader + 4 + 4 + 4
+                            // hdlr: ver+flags(4) + pre_defined(4) → handler_type at +8
+                            let handlerTypeOff = mOff + mHeader + 4 + 4
                             if handlerTypeOff + 4 <= data.count {
                                 let handlerType = String(bytes: data[handlerTypeOff..<handlerTypeOff+4], encoding: .isoLatin1) ?? ""
                                 if handlerType == "vide" { result = true }
@@ -173,18 +175,18 @@ struct QTConformer {
 
         // MARK: trak (video)
 
-        mutating func walkVideoTrak(at trakOff: Int, size: Int, moovEnd: Int) throws {
+        func walkVideoTrak(at trakOff: Int, size: Int, moovEnd: Int) throws {
             let (_, _, trakHeader) = try atomHeader(at: trakOff)
             let trakEnd = trakOff + size
 
-            // Walk mdia to get timescale + patch mdhd + patch stts
+            // Pass 1: read mediaTimescale from mdhd
             try walkChildren(parentOff: trakOff + trakHeader, parentEnd: trakEnd) { off, type, childSize, headerSz in
                 if type == "mdia" {
                     try walkMdia(at: off, size: childSize)
                 }
             }
 
-            // Compute new delta now that we have mediaTimescale
+            // Compute newDelta now that we have mediaTimescale
             guard mediaTimescale > 0 else { throw QTConformerError.missingAtom("mdhd timescale") }
             let rawDelta = Double(mediaTimescale) * Double(fps.den) / Double(fps.num)
             guard rawDelta.truncatingRemainder(dividingBy: 1) == 0, rawDelta > 0 else {
@@ -193,7 +195,17 @@ struct QTConformer {
             }
             newDelta = Int64(rawDelta)
 
-            // Now patch stts (needs newDelta), mdhd duration, tkhd duration
+            // Pass 2: read stts to compute totalSamples and newMediaDuration BEFORE patching.
+            // mdhd appears before minf in the atom tree, so patchMdhd would run with
+            // newMediaDuration=0 if we don't pre-compute it here.
+            try walkChildren(parentOff: trakOff + trakHeader, parentEnd: trakEnd) { off, type, childSize, headerSz in
+                if type == "mdia" {
+                    try readSttsSamples(at: off, size: childSize)
+                }
+            }
+            guard newMediaDuration > 0 else { throw QTConformerError.missingAtom("stts") }
+
+            // Pass 3: patch stts deltas, mdhd duration, tkhd duration (newMediaDuration is now set)
             try walkChildren(parentOff: trakOff + trakHeader, parentEnd: trakEnd) { off, type, childSize, headerSz in
                 if type == "mdia" {
                     try patchMdiaAtoms(at: off, size: childSize)
@@ -222,7 +234,7 @@ struct QTConformer {
 
         // MARK: mdia (first pass — just timescale)
 
-        mutating func walkMdia(at mdiaOff: Int, size: Int) throws {
+        func walkMdia(at mdiaOff: Int, size: Int) throws {
             let (_, _, mdiaHeader) = try atomHeader(at: mdiaOff)
             try walkChildren(parentOff: mdiaOff + mdiaHeader, parentEnd: mdiaOff + size) { off, type, childSize, headerSz in
                 if type == "mdhd" {
@@ -236,9 +248,40 @@ struct QTConformer {
             }
         }
 
-        // MARK: mdia (second pass — patch atoms)
+        // MARK: mdia (second pass — read stts sample count without patching)
 
-        mutating func patchMdiaAtoms(at mdiaOff: Int, size: Int) throws {
+        func readSttsSamples(at mdiaOff: Int, size: Int) throws {
+            let (_, _, mdiaHeader) = try atomHeader(at: mdiaOff)
+            try walkChildren(parentOff: mdiaOff + mdiaHeader, parentEnd: mdiaOff + size) { off, type, childSize, headerSz in
+                if type == "minf" {
+                    let (_, _, minfHeader) = try atomHeader(at: off)
+                    try walkChildren(parentOff: off + minfHeader, parentEnd: off + childSize) { sOff, sType, sSize, sHeader in
+                        if sType == "stbl" {
+                            let (_, _, stblHeader) = try atomHeader(at: sOff)
+                            try walkChildren(parentOff: sOff + stblHeader, parentEnd: sOff + sSize) { tOff, tType, _, tHeader in
+                                if tType == "stts" {
+                                    let base = tOff + tHeader + 4  // skip ver+flags
+                                    let entryCount = Int(try readUInt32(at: base))
+                                    guard entryCount >= 1 && entryCount <= 2 else {
+                                        throw QTConformerError.vfrContent(entryCount: entryCount)
+                                    }
+                                    var sampleTotal: Int64 = 0
+                                    for i in 0..<entryCount {
+                                        sampleTotal += Int64(try readUInt32(at: base + 4 + i * 8))
+                                    }
+                                    totalSamples = sampleTotal
+                                    newMediaDuration = totalSamples * newDelta
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // MARK: mdia (third pass — patch atoms)
+
+        func patchMdiaAtoms(at mdiaOff: Int, size: Int) throws {
             let (_, _, mdiaHeader) = try atomHeader(at: mdiaOff)
             try walkChildren(parentOff: mdiaOff + mdiaHeader, parentEnd: mdiaOff + size) { off, type, childSize, headerSz in
                 if type == "mdhd" {
@@ -249,7 +292,7 @@ struct QTConformer {
             }
         }
 
-        mutating func walkMinf(at minfOff: Int, size: Int) throws {
+        func walkMinf(at minfOff: Int, size: Int) throws {
             let (_, _, minfHeader) = try atomHeader(at: minfOff)
             try walkChildren(parentOff: minfOff + minfHeader, parentEnd: minfOff + size) { off, type, childSize, headerSz in
                 if type == "stbl" {
@@ -258,7 +301,7 @@ struct QTConformer {
             }
         }
 
-        mutating func walkStbl(at stblOff: Int, size: Int) throws {
+        func walkStbl(at stblOff: Int, size: Int) throws {
             let (_, _, stblHeader) = try atomHeader(at: stblOff)
             try walkChildren(parentOff: stblOff + stblHeader, parentEnd: stblOff + size) { off, type, childSize, headerSz in
                 if type == "stts" {
@@ -269,7 +312,7 @@ struct QTConformer {
 
         // MARK: Atom patching
 
-        mutating func patchStts(at off: Int, headerSize: Int) throws {
+        func patchStts(at off: Int, headerSize: Int) throws {
             // Layout: version+flags(4) + entry_count(4) + N × [sample_count(4) + sample_delta(4)]
             let base = off + headerSize + 4  // skip ver+flags
             let entryCount = Int(try readUInt32(at: base))
@@ -289,7 +332,7 @@ struct QTConformer {
             newMediaDuration = totalSamples * newDelta
         }
 
-        mutating func patchMdhd(at off: Int, headerSize: Int) throws {
+        func patchMdhd(at off: Int, headerSize: Int) throws {
             let version = data[off + headerSize]
             // v0: ver+flags(4) + ctime(4) + mtime(4) + timescale(4) + duration(4)
             // v1: ver+flags(4) + ctime(8) + mtime(8) + timescale(4) + duration(8)
@@ -302,7 +345,7 @@ struct QTConformer {
             }
         }
 
-        mutating func patchTkhd(at off: Int, headerSize: Int) throws {
+        func patchTkhd(at off: Int, headerSize: Int) throws {
             guard movieTimescale > 0 else { throw QTConformerError.missingAtom("mvhd timescale") }
             let tkhdDur = newMediaDuration * movieTimescale / mediaTimescale
             let version = data[off + headerSize]
@@ -317,7 +360,7 @@ struct QTConformer {
             }
         }
 
-        mutating func patchMvhd(at off: Int, headerSize: Int) throws {
+        func patchMvhd(at off: Int, headerSize: Int) throws {
             guard movieTimescale > 0, mediaTimescale > 0 else { return }
             let mvhdDur = newMediaDuration * movieTimescale / mediaTimescale
             let version = data[off + headerSize]
@@ -332,7 +375,7 @@ struct QTConformer {
             }
         }
 
-        mutating func patchElst(at off: Int, headerSize: Int) throws {
+        func patchElst(at off: Int, headerSize: Int) throws {
             // Layout: ver+flags(4) + entry_count(4) + N entries
             // v0 entry: segDur(4) + mediaTime(4) + rate(4) = 12 bytes
             // v1 entry: segDur(8) + mediaTime(8) + rate(4) = 20 bytes
@@ -406,7 +449,7 @@ struct QTConformer {
 
         // MARK: - Patch accumulation
 
-        mutating func appendUInt32Patch(at offset: Int, value: UInt32) {
+        func appendUInt32Patch(at offset: Int, value: UInt32) {
             var bytes = [UInt8](repeating: 0, count: 4)
             bytes[0] = UInt8((value >> 24) & 0xFF)
             bytes[1] = UInt8((value >> 16) & 0xFF)
@@ -415,7 +458,7 @@ struct QTConformer {
             patches.append(Patch(offset: offset, bytes: bytes))
         }
 
-        mutating func appendUInt64Patch(at offset: Int, value: UInt64) {
+        func appendUInt64Patch(at offset: Int, value: UInt64) {
             var bytes = [UInt8](repeating: 0, count: 8)
             bytes[0] = UInt8((value >> 56) & 0xFF)
             bytes[1] = UInt8((value >> 48) & 0xFF)

@@ -2,28 +2,35 @@ import SwiftUI
 
 struct ColorMetadataSectionView: View {
     @Binding var settings: JobSettings
+    let mediaFile: MediaFile
+
+    private var video: StreamInfo? { mediaFile.primaryVideo }
 
     var body: some View {
         Section {
             OptionalPicker(label: "Color Primaries",
                            selection: $settings.colorPrimaries,
                            options: ColorPrimaries.allCases,
-                           displayName: { $0.displayName })
+                           displayName: { $0.displayName },
+                           current: video?.colorPrimaries)
 
             OptionalPicker(label: "Transfer Characteristics",
                            selection: $settings.colorTransfer,
                            options: ColorTransfer.allCases,
-                           displayName: { $0.displayName })
+                           displayName: { $0.displayName },
+                           current: video?.colorTransfer)
 
             OptionalPicker(label: "Matrix Coefficients",
                            selection: $settings.colorMatrix,
                            options: ColorMatrix.allCases,
-                           displayName: { $0.displayName })
+                           displayName: { $0.displayName },
+                           current: video?.colorSpace)
 
             OptionalPicker(label: "Color Range",
                            selection: $settings.colorRange,
                            options: ColorRange.allCases,
-                           displayName: { $0.displayName })
+                           displayName: { $0.displayName },
+                           current: video?.colorRange)
 
             // Quick-set presets
             HStack {
