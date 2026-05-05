@@ -146,13 +146,13 @@ class CommandBuilder {
         case .preserve:
             break
         case .remove:
-            // Don't copy the timecode track. We map all streams and exclude data/tmcd.
-            // A more precise approach: -map 0:v -map 0:a (exclude tmcd)
-            // For simplicity, use -map_chapters -1 and skip tmcd stream
-            args += ["-map_chapters", "-1"]
+            // Map all streams then exclude data streams (which include the tmcd track in MOV/MXF).
+            // The negative specifier requires a prior positive map to work correctly.
+            args += ["-map", "0", "-map", "-0:d"]
         case .set:
-            let tc = settings.timecodeStart
-            args += ["-timecode", tc]
+            // timecodeStart is already formatted with ':' (non-drop) or ';' (drop-frame) as the
+            // last separator by the view — FFmpeg reads this separator to set the drop-frame flag.
+            args += ["-timecode", settings.timecodeStart]
         }
 
         // MARK: General metadata
@@ -215,8 +215,13 @@ class CommandBuilder {
             // tmcd track
             switch qt.manageTmcdTrack {
             case .preserve: break
-            case .remove:   args += ["-map", "-0:d"]   // drop data streams (includes tmcd)
-            case .add:      break  // handled via timecode setting
+            case .remove:
+                // Negative map specifiers require a prior positive map; -0:d drops all data streams.
+                // Only add the pair if timecode removal hasn't already inserted them.
+                if settings.timecodeMode != .remove {
+                    args += ["-map", "0", "-map", "-0:d"]
+                }
+            case .add: break  // handled via timecode .set path
             }
         }
 
