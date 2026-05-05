@@ -86,9 +86,14 @@ class CommandBuilder {
             args += ["-aspect:v", dar]
         }
         if let fps = settings.frameRateOverride, !fps.isEmpty {
-            // Override the container-reported frame rate without re-encoding.
-            // Accepts rational notation (e.g. 24000/1001) or decimal (e.g. 23.976).
+            // -r:v with stream copy only updates the container's declared frame rate (avg_frame_rate).
+            // It does NOT change the actual frame timestamps (stts), so the measured rate in
+            // MediaInfo / players stays the same. Truly changing the frame rate requires re-encoding.
+            // Use this for metadata correction only (e.g. container wrongly declares 24 but
+            // timestamps are actually 23.976 — enter 24000/1001 to fix the tag).
             args += ["-r:v", fps]
+            requiresRender = true
+            renderReasons.append("Frame rate change requires re-encoding to update frame timestamps; stream copy only corrects the container declaration")
         }
 
         // MARK: AFD
