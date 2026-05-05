@@ -86,14 +86,15 @@ class CommandBuilder {
             args += ["-aspect:v", dar]
         }
         if let fps = settings.frameRateOverride, !fps.isEmpty {
-            // -r:v with stream copy only updates the container's declared frame rate (avg_frame_rate).
-            // It does NOT change the actual frame timestamps (stts), so the measured rate in
-            // MediaInfo / players stays the same. Truly changing the frame rate requires re-encoding.
-            // Use this for metadata correction only (e.g. container wrongly declares 24 but
-            // timestamps are actually 23.976 — enter 24000/1001 to fix the tag).
-            args += ["-r:v", fps]
-            requiresRender = true
-            renderReasons.append("Frame rate change requires re-encoding to update frame timestamps; stream copy only corrects the container declaration")
+            if [OutputFormat.mov, .mp4].contains(settings.outputFormat) {
+                // QTConformer patches stts/mdhd/tkhd/mvhd/elst atoms directly after FFmpeg runs.
+                // No re-encode needed; no FFmpeg flag required here.
+            } else {
+                // Best-effort for non-QT containers; stream copy may not update measured rate.
+                args += ["-r:v", fps]
+                requiresRender = true
+                renderReasons.append("Frame rate override for \(settings.outputFormat.rawValue) requires re-encoding to update frame timestamps")
+            }
         }
 
         // MARK: AFD

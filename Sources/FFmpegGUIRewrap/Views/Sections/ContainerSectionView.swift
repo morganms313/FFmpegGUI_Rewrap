@@ -28,9 +28,9 @@ struct ContainerSectionView: View {
                               value: $settings.darOverride,
                               label: "Display Aspect Ratio")
 
-            OptionalTextField("Tag fix only, not conform (e.g. 24000/1001)",
+            OptionalTextField("e.g. 24000/1001 or 24",
                               value: $settings.frameRateOverride,
-                              label: "Frame Rate (⚠ tag only)")
+                              label: "Frame Rate")
 
             // Field order
             OptionalPicker(label: "Field Order",
