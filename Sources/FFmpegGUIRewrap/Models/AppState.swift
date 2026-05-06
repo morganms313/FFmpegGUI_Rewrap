@@ -126,9 +126,14 @@ class AppState {
             // Read the source file's mvhd timescale so QTConformer can restore it
             // if FFmpeg's muxer normalised it (e.g. ARRI 24000 → FFmpeg default 1000).
             let srcTimescale = QTConformer.readMovieTimescale(url: job.mediaFile.url)
+            let outTimescale = QTConformer.readMovieTimescale(url: outputURL)
+            job.appendLog("QTConformer: source mvhd timescale = \(srcTimescale.map(String.init) ?? "<unreadable>")")
+            job.appendLog("QTConformer: ffmpeg output mvhd timescale = \(outTimescale.map(String.init) ?? "<unreadable>")")
             do {
                 try QTConformer.conform(url: outputURL, targetFPS: fps,
                                         originalMovieTimescale: srcTimescale)
+                let finalTimescale = QTConformer.readMovieTimescale(url: outputURL)
+                job.appendLog("QTConformer: final mvhd timescale = \(finalTimescale.map(String.init) ?? "<unreadable>")")
                 job.appendLog("QT frame-rate conform applied: \(fps) fps")
             } catch {
                 job.status = .failed(error: "Frame rate conform failed: \(error.localizedDescription)")
