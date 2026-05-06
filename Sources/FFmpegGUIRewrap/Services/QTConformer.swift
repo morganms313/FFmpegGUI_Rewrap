@@ -161,10 +161,12 @@ struct QTConformer {
         var patches: [Patch] = []
 
         // Collected from the video track's mdhd
-        var mediaTimescale: Int64 = 0
-        var newDelta: Int64 = 0          // mediaTimescale * den / num  (must be integer)
+        var mediaTimescale: Int64 = 0    // original mdhd timescale (read from file)
+        var newMediaTimescale: Int64 = 0 // mdhd timescale to write — equals mediaTimescale
+                                         // unless the rate doesn't divide cleanly
+        var newDelta: Int64 = 0          // stts delta value, in newMediaTimescale units
         var totalSamples: Int64 = 0
-        var newMediaDuration: Int64 = 0  // totalSamples * newDelta
+        var newMediaDuration: Int64 = 0  // totalSamples * newDelta (in newMediaTimescale units)
         var movieTimescale: Int64 = 0    // read from output file's mvhd
 
         /// Caller-supplied original mvhd timescale (from source file before FFmpeg ran).
@@ -266,14 +268,19 @@ struct QTConformer {
                 }
             }
 
-            // Compute newDelta now that we have mediaTimescale
+            // Compute newDelta + the mdhd timescale we'll write.
+            // If the source mediaTimescale doesn't yield an integer delta for the target
+            // rational, switch the mdhd timescale to fps.num so delta = fps.den (e.g.
+            // a 48-timescale source conforming to 48000/1001 → new timescale 48000, delta 1001).
             guard mediaTimescale > 0 else { throw QTConformerError.missingAtom("mdhd timescale") }
             let rawDelta = Double(mediaTimescale) * Double(fps.den) / Double(fps.num)
-            guard rawDelta.truncatingRemainder(dividingBy: 1) == 0, rawDelta > 0 else {
-                throw QTConformerError.incompatibleRate(
-                    fps: "\(fps.num)/\(fps.den)", timescale: Int(mediaTimescale))
+            if rawDelta > 0, rawDelta.truncatingRemainder(dividingBy: 1) == 0 {
+                newMediaTimescale = mediaTimescale
+                newDelta = Int64(rawDelta)
+            } else {
+                newMediaTimescale = fps.num
+                newDelta = fps.den
             }
-            newDelta = Int64(rawDelta)
 
             // Pass 2: read stts to compute totalSamples and newMediaDuration BEFORE patching.
             // mdhd appears before minf in the atom tree, so patchMdhd would run with
@@ -417,17 +424,25 @@ struct QTConformer {
             // v0: ver+flags(4) + ctime(4) + mtime(4) + timescale(4) + duration(4)
             // v1: ver+flags(4) + ctime(8) + mtime(8) + timescale(4) + duration(8)
             if version == 0 {
-                let durOff = off + headerSize + 4 + 4 + 4 + 4  // skip ver+flags, ctime, mtime, timescale
+                let tsOff  = off + headerSize + 4 + 4 + 4          // timescale field
+                let durOff = off + headerSize + 4 + 4 + 4 + 4      // duration field
+                if newMediaTimescale != mediaTimescale {
+                    appendUInt32Patch(at: tsOff, value: UInt32(newMediaTimescale))
+                }
                 appendUInt32Patch(at: durOff, value: UInt32(newMediaDuration))
             } else {
-                let durOff = off + headerSize + 4 + 8 + 8 + 4  // skip ver+flags, ctime, mtime, timescale
+                let tsOff  = off + headerSize + 4 + 8 + 8          // timescale field
+                let durOff = off + headerSize + 4 + 8 + 8 + 4      // duration field
+                if newMediaTimescale != mediaTimescale {
+                    appendUInt32Patch(at: tsOff, value: UInt32(newMediaTimescale))
+                }
                 appendUInt64Patch(at: durOff, value: UInt64(newMediaDuration))
             }
         }
 
         func patchTkhd(at off: Int, headerSize: Int) throws {
             guard movieTimescale > 0 else { throw QTConformerError.missingAtom("mvhd timescale") }
-            let tkhdDur = newMediaDuration * effectiveMovieTimescale / mediaTimescale
+            let tkhdDur = newMediaDuration * effectiveMovieTimescale / newMediaTimescale
             let version = data[off + headerSize]
             if version == 0 {
                 // ver+flags(4) + ctime(4) + mtime(4) + trackID(4) + reserved(4) + duration(4)
@@ -442,7 +457,7 @@ struct QTConformer {
 
         func patchMvhd(at off: Int, headerSize: Int) throws {
             guard movieTimescale > 0, mediaTimescale > 0 else { return }
-            let mvhdDur = newMediaDuration * effectiveMovieTimescale / mediaTimescale
+            let mvhdDur = newMediaDuration * effectiveMovieTimescale / newMediaTimescale
             let version = data[off + headerSize]
             if version == 0 {
                 // ver+flags(4) + ctime(4) + mtime(4) + timescale(4) + duration(4)
@@ -469,8 +484,8 @@ struct QTConformer {
             // v0 entry: segDur(4) + mediaTime(4) + rate(4) = 12 bytes
             // v1 entry: segDur(8) + mediaTime(8) + rate(4) = 20 bytes
             guard movieTimescale > 0, mediaTimescale > 0 else { return }
-            let newSegDurV0 = UInt32(newMediaDuration * effectiveMovieTimescale / mediaTimescale)
-            let newSegDurV1 = UInt64(newMediaDuration * effectiveMovieTimescale / mediaTimescale)
+            let newSegDurV0 = UInt32(newMediaDuration * effectiveMovieTimescale / newMediaTimescale)
+            let newSegDurV1 = UInt64(newMediaDuration * effectiveMovieTimescale / newMediaTimescale)
 
             let version = data[off + headerSize]
             let base = off + headerSize + 4  // skip ver+flags
@@ -615,7 +630,7 @@ enum QTConformerError: LocalizedError {
         case .vfrContent(let count):
             return "File appears to have variable frame rate (stts entry_count=\(count)). Only CFR files (≤2 stts entries) are supported."
         case .incompatibleRate(let fps, let timescale):
-            return "Frame rate \(fps) is not compatible with media timescale \(timescale) — the resulting sample delta is not an integer."
+            return "Frame rate \(fps) is not compatible with the file's media timescale \(timescale) — the resulting sample delta would not be a whole number, which would break playback. Switch the Frame Rate Conform mode to \"Full rewrap (FFmpeg)\" so FFmpeg can renormalise the timescale first."
         case .missingAtom(let name):
             return "Required atom '\(name)' was not found in the file."
         case .invalidFPS(let s):

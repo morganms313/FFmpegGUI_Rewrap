@@ -211,7 +211,9 @@ class AppState {
             job.appendLog("\(inPlace ? "In-place" : "Fast clone") frame-rate conform applied: \(fps) fps")
             job.status = .done(outputURL: outputURL)
         } catch {
-            job.status = .failed(error: "Frame rate conform failed: \(error.localizedDescription)")
+            let msg = "Frame rate conform failed: \(error.localizedDescription)"
+            job.appendLog("ERROR: \(msg)")
+            job.status = .failed(error: msg)
         }
     }
 
