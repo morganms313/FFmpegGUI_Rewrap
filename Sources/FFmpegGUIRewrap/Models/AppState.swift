@@ -176,23 +176,30 @@ class AppState {
         job.status = .running(progress: 0)
         job.ffmpegCommand = []  // no ffmpeg invocation
 
-        // Read source timescale BEFORE any patching so we can preserve it.
-        // (For inPlace, this read happens before the source is modified.)
-        let srcTimescale = QTConformer.readMovieTimescale(url: job.mediaFile.url)
-
         if inPlace {
-            job.appendLog("In-place mode: patching \(job.mediaFile.url.path) directly (no new file).")
+            job.appendLog("In-place mode: will patch \(job.mediaFile.url.path) directly (no new file).")
         } else {
-            job.appendLog("Fast clone mode: cloning source → \(outputURL.path)")
+            job.appendLog("Fast clone mode: source = \(job.mediaFile.url.path)")
+            job.appendLog("Fast clone mode: target = \(outputURL.path)")
+        }
+
+        // Read source timescale BEFORE any patching so we can preserve it.
+        // (Reads only the moov atom — fast even for files on network volumes.)
+        job.appendLog("Reading source mvhd timescale…")
+        let srcTimescale = QTConformer.readMovieTimescale(url: job.mediaFile.url)
+        job.appendLog("Source mvhd timescale = \(srcTimescale.map(String.init) ?? "<unreadable>")")
+
+        if !inPlace {
             // Remove any existing file at output
             if FileManager.default.fileExists(atPath: outputURL.path) {
+                job.appendLog("Removing existing output file…")
                 do { try FileManager.default.removeItem(at: outputURL) }
                 catch {
                     job.status = .failed(error: "Could not overwrite existing output: \(error.localizedDescription)")
                     return
                 }
             }
-            // FileManager.copyItem uses copyfile() which auto-uses APFS CLONE on same volume
+            job.appendLog("Cloning source → output (APFS clone if same volume)…")
             do {
                 try FileManager.default.copyItem(at: job.mediaFile.url, to: outputURL)
                 job.appendLog("Clone complete.")
@@ -202,7 +209,7 @@ class AppState {
             }
         }
 
-        job.appendLog("QTConformer: source mvhd timescale = \(srcTimescale.map(String.init) ?? "<unreadable>")")
+        job.appendLog("Running QTConformer atom patches…")
         do {
             try QTConformer.conform(url: outputURL, targetFPS: fps,
                                     originalMovieTimescale: srcTimescale)

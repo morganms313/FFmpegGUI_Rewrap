@@ -19,55 +19,90 @@ struct QTConformer {
     ///     denominated durations (mvhd, tkhd, elst) are recomputed accordingly. This corrects
     ///     FFmpeg's MOV muxer silently normalising the timescale to 1000.
     static func conform(url: URL, targetFPS: String, originalMovieTimescale: Int64? = nil) throws {
-        // 1. Memory-map the file for efficient parsing.
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        // 1. Locate moov and read ONLY that atom (typically a few MB; mdat can be GB).
+        //    This is essential for files on network volumes where mapping the entire
+        //    file would either fail or copy multi-GB into RAM.
+        let (moovData, moovOffset) = try readMoovOnly(url: url)
 
         // 2. Parse the FPS into a rational.
         let fps = try parseFPS(targetFPS)
 
-        // 3. Walk the atom tree and collect patches.
-        let ctx = ConformContext(data: data, fps: fps, originalMovieTimescale: originalMovieTimescale)
+        // 3. Walk moov and collect patches (offsets are within moovData).
+        let ctx = ConformContext(data: moovData, fps: fps, originalMovieTimescale: originalMovieTimescale)
         try ctx.findMoov()
 
-        // 4. Apply all patches via FileHandle.
+        // 4. Apply all patches via FileHandle, translating offsets to absolute file
+        //    positions by adding moovOffset.
         let fh = try FileHandle(forUpdating: url)
         defer { fh.synchronizeFile(); try? fh.close() }
         for patch in ctx.patches.sorted(by: { $0.offset < $1.offset }) {
-            try fh.seek(toOffset: UInt64(patch.offset))
+            try fh.seek(toOffset: moovOffset + UInt64(patch.offset))
             fh.write(Data(patch.bytes))
         }
     }
 
-    /// Read just the mvhd timescale from `url` without modifying the file.
-    /// Returns nil if the file has no moov/mvhd or cannot be parsed.
+    /// Read just the mvhd timescale from `url`. Reads only the moov atom, not the whole file.
     static func readMovieTimescale(url: URL) -> Int64? {
-        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
-        var offset = 0
-        while offset < data.count - 8 {
-            guard let (size, type, headerSz) = try? atomHeader(data: data, at: offset) else { break }
-            if type == "moov" {
-                return readMvhdTimescale(data: data, moovOff: offset, moovHeaderSz: headerSz, moovSize: size)
-            }
-            let next = offset + size
-            guard next > offset else { break }
-            offset = next
-        }
-        return nil
+        guard let (moovData, _) = try? readMoovOnly(url: url) else { return nil }
+        // moovData starts with the moov atom itself, so findMoov sees it at offset 0.
+        return readMvhdTimescaleInMoov(data: moovData)
     }
 
-    private static func readMvhdTimescale(data: Data, moovOff: Int, moovHeaderSz: Int, moovSize: Int) -> Int64? {
-        var cursor = moovOff + moovHeaderSz
-        let end = moovOff + moovSize
+    /// Scan top-level atoms via FileHandle (reading only 8-byte headers) until moov is found,
+    /// then read just that atom's bytes. Avoids materialising mdat in memory.
+    private static func readMoovOnly(url: URL) throws -> (moovData: Data, moovFileOffset: UInt64) {
+        let fh = try FileHandle(forReadingFrom: url)
+        defer { try? fh.close() }
+        let fileSize = try fh.seekToEnd()
+        try fh.seek(toOffset: 0)
+
+        var cursor: UInt64 = 0
+        while cursor + 8 <= fileSize {
+            try fh.seek(toOffset: cursor)
+            let header = fh.readData(ofLength: 8)
+            guard header.count == 8 else { break }
+            let rawSize = UInt32(header[0]) << 24 | UInt32(header[1]) << 16
+                        | UInt32(header[2]) << 8  | UInt32(header[3])
+            let type = String(bytes: header[4..<8], encoding: .isoLatin1) ?? "????"
+
+            var atomSize: UInt64
+            if rawSize == 1 {
+                let ext = fh.readData(ofLength: 8)
+                guard ext.count == 8 else { break }
+                atomSize = (0..<8).reduce(UInt64(0)) { $0 << 8 | UInt64(ext[$1]) }
+            } else if rawSize == 0 {
+                atomSize = fileSize - cursor
+            } else {
+                atomSize = UInt64(rawSize)
+            }
+            guard atomSize >= 8 else { throw QTConformerError.malformedAtom }
+
+            if type == "moov" {
+                try fh.seek(toOffset: cursor)
+                let moovBytes = fh.readData(ofLength: Int(atomSize))
+                guard moovBytes.count == Int(atomSize) else { throw QTConformerError.malformedAtom }
+                return (moovBytes, cursor)
+            }
+            cursor += atomSize
+        }
+        throw QTConformerError.noMoovAtom
+    }
+
+    /// Reads mvhd timescale from a Data buffer that begins with a moov atom.
+    private static func readMvhdTimescaleInMoov(data: Data) -> Int64? {
+        guard let (size, type, headerSz) = try? atomHeader(data: data, at: 0), type == "moov" else { return nil }
+        var cursor = headerSz
+        let end = size
         while cursor < end - 7 {
-            guard let (size, type, headerSz) = try? atomHeader(data: data, at: cursor) else { break }
-            if type == "mvhd" {
-                let versionOff = cursor + headerSz
+            guard let (childSize, childType, childHeader) = try? atomHeader(data: data, at: cursor) else { break }
+            if childType == "mvhd" {
+                let versionOff = cursor + childHeader
                 guard versionOff < data.count else { break }
                 let version = data[versionOff]
                 let tsOff = versionOff + (version == 1 ? 20 : 12)
                 return try? readUInt32(data: data, at: tsOff)
             }
-            let next = cursor + size
+            let next = cursor + childSize
             guard next > cursor else { break }
             cursor = next
         }
