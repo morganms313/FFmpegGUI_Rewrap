@@ -413,6 +413,12 @@ struct JobSettings: Codable, Equatable {
     var darOverride: String?       // e.g. "16:9"
     var frameRateOverride: String? // e.g. "24000/1001"
 
+    /// How the frame-rate change is applied. Defaults to a full FFmpeg rewrap so all
+    /// other settings are honoured. The two fast modes skip FFmpeg entirely and only
+    /// honour `frameRateOverride`; everything else (color, metadata, audio, etc.) is
+    /// silently ignored. Only valid for .mov / .mp4 output.
+    var frameRateConformMode: FrameRateConformMode = .rewrap
+
     // MARK: AFD
     var afdMode: AFDMode = .preserve
     var afdCode: Int     = 8       // default: AFD_8 (full frame 16:9)
@@ -448,4 +454,12 @@ struct JobSettings: Codable, Equatable {
     var outputDirectory: String?
     var filenameTemplate: FilenameTemplate = .nameRewrap
     var customFilenameTemplate: String     = "{name}_rewrap"
+}
+
+enum FrameRateConformMode: String, CaseIterable, Codable, Identifiable {
+    case rewrap    = "Full rewrap (FFmpeg)"
+    case fastClone = "Fast: clone + atom patch"
+    case inPlace   = "Patch source in place (destructive)"
+    var id: Self { self }
+    var displayName: String { rawValue }
 }

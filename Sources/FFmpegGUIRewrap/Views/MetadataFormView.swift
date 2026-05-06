@@ -7,19 +7,22 @@ struct MetadataFormView: View {
     var body: some View {
         Form {
             ContainerSectionView(settings: $settings, mediaFile: mediaFile)
-            ColorMetadataSectionView(settings: $settings, mediaFile: mediaFile)
-            AFDSectionView(settings: $settings)
-            HDRSectionView(settings: $settings)
-            TimecodeSectionView(settings: $settings)
-            AudioSectionView(settings: $settings, mediaFile: mediaFile)
-            if settings.outputFormat == .mxf {
-                MXFSectionView(settings: $settings)
+            Group {
+                ColorMetadataSectionView(settings: $settings, mediaFile: mediaFile)
+                AFDSectionView(settings: $settings)
+                HDRSectionView(settings: $settings)
+                TimecodeSectionView(settings: $settings)
+                AudioSectionView(settings: $settings, mediaFile: mediaFile)
+                if settings.outputFormat == .mxf {
+                    MXFSectionView(settings: $settings)
+                }
+                if settings.outputFormat == .mov {
+                    QuickTimeSectionView(settings: $settings)
+                }
+                GeneralMetadataSectionView(settings: $settings)
             }
-            if settings.outputFormat == .mov {
-                QuickTimeSectionView(settings: $settings)
-            }
-            GeneralMetadataSectionView(settings: $settings)
-            OutputSectionView(settings: $settings)
+            .disabled(settings.frameRateConformMode != .rewrap)
+            OutputSectionView(settings: $settings, mediaFile: mediaFile)
         }
         .formStyle(.grouped)
     }
@@ -29,6 +32,7 @@ struct MetadataFormView: View {
 
 struct OutputSectionView: View {
     @Binding var settings: JobSettings
+    let mediaFile: MediaFile
 
     var body: some View {
         Section("Output") {
@@ -51,13 +55,18 @@ struct OutputSectionView: View {
                     panel.canChooseFiles = false
                     panel.canChooseDirectories = true
                     panel.allowsMultipleSelection = false
+                    // Default the picker to the source file's directory so users
+                    // typically just confirm rather than navigating.
+                    panel.directoryURL = settings.outputDirectory
+                        .map { URL(fileURLWithPath: $0) }
+                        ?? mediaFile.url.deletingLastPathComponent()
                     if panel.runModal() == .OK {
                         settings.outputDirectory = panel.url?.path
                     }
                 }
                 if settings.outputDirectory != nil {
-                    Button("Clear") { settings.outputDirectory = nil }
-                        .foregroundStyle(.red)
+                    Button("Same as source") { settings.outputDirectory = nil }
+                        .foregroundStyle(.secondary)
                 }
             }
             .accessibilityLabel("Output Directory")

@@ -85,12 +85,29 @@ class AppState {
     }
 
     func processJob(_ job: ProcessingJob) async {
-        guard let ffmpegPath = ffmpegURL?.path else {
-            job.status = .failed(error: "ffmpeg not found. Run 'make fetch-ffmpeg' or install FFmpeg.")
+        // Fast paths: skip FFmpeg, only frameRateOverride is honoured.
+        switch job.settings.frameRateConformMode {
+        case .fastClone:
+            guard let outputURL = job.resolvedOutputURL() else {
+                job.status = .failed(error: "Could not resolve output path.")
+                return
+            }
+            await processFastFrameRateOnly(job: job, outputURL: outputURL, inPlace: false)
             return
+        case .inPlace:
+            await processFastFrameRateOnly(job: job, outputURL: job.mediaFile.url, inPlace: true)
+            return
+        case .rewrap:
+            break
         }
+
         guard let outputURL = job.resolvedOutputURL() else {
             job.status = .failed(error: "Could not resolve output path.")
+            return
+        }
+
+        guard let ffmpegPath = ffmpegURL?.path else {
+            job.status = .failed(error: "ffmpeg not found. Run 'make fetch-ffmpeg' or install FFmpeg.")
             return
         }
 
@@ -138,6 +155,63 @@ class AppState {
             } catch {
                 job.status = .failed(error: "Frame rate conform failed: \(error.localizedDescription)")
             }
+        }
+    }
+
+    // MARK: Fast frame-rate-only path
+
+    /// Skips FFmpeg, only honours `frameRateOverride`.
+    /// - inPlace=false: clones source → output (APFS clone if same volume) and patches the clone
+    /// - inPlace=true: patches the source file directly (destructive, no new file)
+    private func processFastFrameRateOnly(job: ProcessingJob, outputURL: URL, inPlace: Bool) async {
+        guard [OutputFormat.mov, .mp4].contains(job.settings.outputFormat) else {
+            job.status = .failed(error: "Fast frame-rate mode only supports .mov / .mp4 output.")
+            return
+        }
+        guard let fps = job.settings.frameRateOverride, !fps.isEmpty else {
+            job.status = .failed(error: "Fast frame-rate mode requires a Frame Rate value.")
+            return
+        }
+
+        job.status = .running(progress: 0)
+        job.ffmpegCommand = []  // no ffmpeg invocation
+
+        // Read source timescale BEFORE any patching so we can preserve it.
+        // (For inPlace, this read happens before the source is modified.)
+        let srcTimescale = QTConformer.readMovieTimescale(url: job.mediaFile.url)
+
+        if inPlace {
+            job.appendLog("In-place mode: patching \(job.mediaFile.url.path) directly (no new file).")
+        } else {
+            job.appendLog("Fast clone mode: cloning source → \(outputURL.path)")
+            // Remove any existing file at output
+            if FileManager.default.fileExists(atPath: outputURL.path) {
+                do { try FileManager.default.removeItem(at: outputURL) }
+                catch {
+                    job.status = .failed(error: "Could not overwrite existing output: \(error.localizedDescription)")
+                    return
+                }
+            }
+            // FileManager.copyItem uses copyfile() which auto-uses APFS CLONE on same volume
+            do {
+                try FileManager.default.copyItem(at: job.mediaFile.url, to: outputURL)
+                job.appendLog("Clone complete.")
+            } catch {
+                job.status = .failed(error: "Clone failed: \(error.localizedDescription)")
+                return
+            }
+        }
+
+        job.appendLog("QTConformer: source mvhd timescale = \(srcTimescale.map(String.init) ?? "<unreadable>")")
+        do {
+            try QTConformer.conform(url: outputURL, targetFPS: fps,
+                                    originalMovieTimescale: srcTimescale)
+            let finalTimescale = QTConformer.readMovieTimescale(url: outputURL)
+            job.appendLog("QTConformer: final mvhd timescale = \(finalTimescale.map(String.init) ?? "<unreadable>")")
+            job.appendLog("\(inPlace ? "In-place" : "Fast clone") frame-rate conform applied: \(fps) fps")
+            job.status = .done(outputURL: outputURL)
+        } catch {
+            job.status = .failed(error: "Frame rate conform failed: \(error.localizedDescription)")
         }
     }
 
